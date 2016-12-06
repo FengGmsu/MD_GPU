@@ -143,6 +143,53 @@ int main() {
 		}
 	}
 	
+	
+	//Tonight 
+	// number of box after mesh
+	int numbox = 0;
+	// mesh size
+	int mesh = 0;
+	//store every atom belongs to which box
+	int boxid[N] = 0;
+	//store which box contains which atom
+	int box[numbox][N/2] = 0;
+	//calculate every atom belongs to which box, mesh build at the same time
+	for (i=0;i<=N;i++){
+		boxid[i] = floor(R[i][0]/mesh) + floor(numbox*R[i][1]/mesh) + floor(numbox*numbox*R[i][2]/mesh);
+	}
+	// calculate which box contains which atom, build cell list
+	for (i=0;i<=numbox;i++)
+	{
+		k = 0;
+		for(j=0;j<=N;j++)
+	        {
+                   if(boxid[j] ==i)
+		   {
+			box[i][k] = j;
+		        k++;
+		    }
+	        }
+	}
+	//force calculation within cutoff cell,calculate the force in nearby 26 cells
+	run getforce function
+	//force calculation outside cutoff cell, particle-mesh
+	//first we assign charges to vertex
+	for (i=0;i<=meshpoint;i++)
+	{
+		detx = R[i][0] - ;
+		dety = R[i][1] - ;
+		dety = R[i][2] - ;
+		ro[i] += ChargeAssign(detx,dety,detz,h);
+		
+	double ChargeAssign(double x,double y, double z, h)
+		{
+			return W = sin(1/2*x*h)/(1/2*x*h) * sin(1/2*y*h)/(1/2*y*h) * sin(1/2*z*h)/(1/2*z*h);
+		}
+	double ElectricField(rp)
+	        {
+		
+	}
+	
 	//output initR for check
 //	fprintf(initR,"%d \n", N);
 //	fprintf(initR,"%d \n", 0);
