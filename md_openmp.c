@@ -7,13 +7,16 @@
 	3. [done] check with the fortran version
 	4. working CPU with PPPM
 		4.1 Get all the possible component for GPU version in CPU
-			* particle pre-assignment for spacial decomposition on CPU
+			* set up Periodic boundary conditions
+			* [done] particle pre-assignment for spacial decomposition on CPU
 			*	data(position) move from host to device in share mem[look at cuda example]
 			*	CHARGE ASSIGNMENT with weight function
 			*	FIELD CALCULATION using fft library for electronic potential
 					differential of potential can get the electronic field
 			*	INTERPOLATION of force with the same weight function to get the force from neighboring mesh points 
 	5. try to get PPPM working with GPU
+	6. Other improvement
+		* set up a class for neighbor list storage
 
 	origian Fortran code version: MD_1121.f90
 
@@ -27,9 +30,13 @@
 
 //simulation setup
 #define N 1000				//number of particles
-#define Ntime 1000			//number of iternations
+#define Ntime 1000		//number of iternations
 #define newR 46022.8	//initial radius of bunch
 #define cutoff 20			//lower limit of the initial distance between electrons
+
+//PPPM setup
+#define bn 10					//number of boxes per direction
+#define box_cap 101		//temporary cap for particles in one box; update to class later
 
 //parameters
 #define m 5.4858e-4		//elelctron mass
@@ -67,7 +74,21 @@ double getKE(double v[N][3]){
 	return KE_c;
 }
 
-void getForce(double f[N][3],double r[N][3]) {
+// assign electron into bn*bn*bn boxes and store their idx
+void update_box(double r[N][3], int box[bn][bn][bn][boxcap]) {
+	double lx = newR/(double)bn;
+	int i,bx,by,bz,num;
+	for (i=0; i<N; i++) { 
+		bx = (int)floor(r[i][1]/lx);
+		by = (int)floor(r[i][2]/lx);
+		bz = (int)floor(r[i][3]/lx);
+		num = box[bx][by][bz][0]+1;
+		box[bx][by][bz][0] = num;
+		box[bx][by][bz][num] = i;
+	}
+}
+
+void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap]) {
 	int i,j,k;
 	double rel[3], rel_c, fij[3];
 	//use openmp here with (rel[3],rel_c,fij) private
@@ -92,7 +113,7 @@ void getForce(double f[N][3],double r[N][3]) {
 	}
 }
 
-void verlet(double r[N][3],double v[N][3],double f[N][3], double dt){
+void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][boxcap], double dt){
 	int i,j;
 	double hdtm = 0.5*dt/m; 
 	for (i=0; i<N; i++) {
@@ -102,7 +123,8 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], double dt){
 			f[i][j] = 0.0; //setup for force calculation
 		}
 	}
-	getForce(f,r);
+	update_box(R,box);
+	getForce(f,r,box);
 	for (i=0; i<N; i++) {
 		for (j=0; j<3; j++) {
 			v[i][j] += f[i][j]*hdtm;
@@ -110,8 +132,11 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], double dt){
 	}
 }
 
+
+
 int main() {
 	double R[N][3] = {{0.0}}, V[N][3] = {{1.0}}, F[N][3]={{0.0}};
+	int box[bn][bn][bn][boxcap]; // need to go to class or dynamic array later 
 	int i, iter;
 	int numb, check;
 	double dt = 1.0, realt = 0.0;
@@ -124,6 +149,7 @@ int main() {
 	To = fopen("./time.dat","w+");
 	initR = fopen("./initR.xyz","w+");
 
+	// Initialization in a sphere
 	srand(time(NULL));
 	numb = 0;
 	while (numb < N) {
@@ -157,7 +183,7 @@ int main() {
 //		fprintf(initR,"%5d %11.3f \t %11.3f \t %11.3f \n",1,R[i][0],R[i][1],R[i][2]);
 //	}
 	for (iter = 0; iter< Ntime; iter++) {
-		verlet(R,V,F,dt);
+		verlet(R,V,F,box,dt);
 		realt += dt;
 
 		//output
