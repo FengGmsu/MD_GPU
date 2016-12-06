@@ -9,12 +9,12 @@
 		4.1 Get all the possible component for GPU version in CPU
 			* set up Periodic boundary conditions
 			* [done] particle pre-assignment for spacial decomposition on CPU
-			*	data(position) move from host to device in share mem[look at cuda example]
 			*	CHARGE ASSIGNMENT with weight function
 			*	FIELD CALCULATION using fft library for electronic potential
 					differential of potential can get the electronic field
 			*	INTERPOLATION of force with the same weight function to get the force from neighboring mesh points 
 	5. try to get PPPM working with GPU
+		*	data(position) move from host to device in share mem[look at cuda example]
 	6. Other improvement
 		* set up a class for neighbor list storage
 
@@ -36,7 +36,8 @@
 
 //PPPM setup
 #define bn 10					//number of boxes per direction
-#define box_cap 101		//temporary cap for particles in one box; update to class later
+#define boxcap 101		//temporary cap for particles in one box; update to class later
+#define pp_cutoff 500 //pp cutoff for direct interaction
 
 //parameters
 #define m 5.4858e-4		//elelctron mass
@@ -74,23 +75,40 @@ double getKE(double v[N][3]){
 	return KE_c;
 }
 
+int pbc_box(int point){
+	if (point == -1) {
+		return bn-1;
+	}
+	else if (point == (bn-1)) {
+		return 0;
+	}
+	else {
+		return point;
+	}
+}
+
 // assign electron into bn*bn*bn boxes and store their idx
-void update_box(double r[N][3], int box[bn][bn][bn][boxcap]) {
+void update_box(double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3]) {
 	double lx = newR/(double)bn;
 	int i,bx,by,bz,num;
 	for (i=0; i<N; i++) { 
-		bx = (int)floor(r[i][1]/lx);
-		by = (int)floor(r[i][2]/lx);
-		bz = (int)floor(r[i][3]/lx);
+		bx = (int)floor(r[i][0]/lx);
+		by = (int)floor(r[i][1]/lx);
+		bz = (int)floor(r[i][2]/lx);
+		boxid[i][0] = bx;
+		boxid[i][1] = by;
+		boxid[i][2] = bz;
 		num = box[bx][by][bz][0]+1;
 		box[bx][by][bz][0] = num;
 		box[bx][by][bz][num] = i;
 	}
 }
 
-void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap]) {
-	int i,j,k;
+void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3]) {
+	int i,j,k,bx,by,bz,dbx,dby,dbz,pbx,pby,pbz;
 	double rel[3], rel_c, fij[3];
+/* openmp version without cutoff
+ *
 	//use openmp here with (rel[3],rel_c,fij) private
 	#pragma omp parallel for private(i,j,k,rel,rel_c,fij)
 	for (j=0; j<(N-1); j++) {
@@ -111,9 +129,49 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap]) {
 			}
 		}
 	}
+*/
+	// PP calculation using cell-list
+	for (i=0; i<N; i++) {
+		bx = boxid[i][0];
+		by = boxid[i][1];
+		bz = boxid[i][2];
+		//go through neighboring cell and check electrons within cutoff
+		for (dbx = -1; dbx  < 2; dbx++) {
+			pbx = pbc_box(bx+dbx);
+			for (dby = -1; dby  < 2; dby++) {
+				pby = pbc_box(by+dby);
+				for (dbz = -1; dbz  < 2; dbz++) {
+					// periodic boundary condition needed here
+					pbz = pbc_box(bz+dbz);
+					for (j = 1; j<box[pbx][pby][pby][0]; j++){
+						rel_c = 0.0;
+						for (k=0; k<3; k++) {
+							rel[k] = r[i][k] - r[j][k];
+							rel_c += pow(rel[k], 2.0 );
+						}
+						if (rel_c <= pp_cutoff) {
+							rel_c = pow(rel_c, -1.5 );
+							for (k=0; k<3; k++) {
+								fij[k] = rel[k]*rel_c;
+								//atomic operation here
+								#pragma omp atomic
+								f[j][k] -= fij[k];
+								#pragma omp atomic
+								f[i][k] += fij[k];
+							}
+						}
+					}
+				}
+			}
+		}
+		//charge assignment
+	}
+
+	//PM Here
+	
 }
 
-void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][boxcap], double dt){
+void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3], double dt){
 	int i,j;
 	double hdtm = 0.5*dt/m; 
 	for (i=0; i<N; i++) {
@@ -123,8 +181,8 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][bo
 			f[i][j] = 0.0; //setup for force calculation
 		}
 	}
-	update_box(R,box);
-	getForce(f,r,box);
+	update_box(r,box,boxid);
+	getForce(f,r,box,boxid);
 	for (i=0; i<N; i++) {
 		for (j=0; j<3; j++) {
 			v[i][j] += f[i][j]*hdtm;
@@ -136,7 +194,9 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][bo
 
 int main() {
 	double R[N][3] = {{0.0}}, V[N][3] = {{1.0}}, F[N][3]={{0.0}};
-	int box[bn][bn][bn][boxcap]; // need to go to class or dynamic array later 
+	int box[bn][bn][bn][boxcap]; // need to go to class or dynamic array later
+	// for now, [0] is for number of electrons in the box, and then [1]-[number] is the electron id
+	int boxid[N][3];
 	int i, iter;
 	int numb, check;
 	double dt = 1.0, realt = 0.0;
@@ -183,7 +243,7 @@ int main() {
 //		fprintf(initR,"%5d %11.3f \t %11.3f \t %11.3f \n",1,R[i][0],R[i][1],R[i][2]);
 //	}
 	for (iter = 0; iter< Ntime; iter++) {
-		verlet(R,V,F,box,dt);
+		verlet(R,V,F,box,boxid,dt);
 		realt += dt;
 
 		//output
