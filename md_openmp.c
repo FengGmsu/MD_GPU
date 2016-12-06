@@ -38,6 +38,8 @@
 #define bn 10					//number of boxes per direction
 #define boxcap 101		//temporary cap for particles in one box; update to class later
 #define pp_cutoff 500 //pp cutoff for direct interaction
+#define hx  4602.3		//should be newR/bn for length of box and meshsize 
+#define hx3 9.748e10  //hx^3
 
 //parameters
 #define m 5.4858e-4		//elelctron mass
@@ -45,6 +47,18 @@
 #define PI 3.141592653589793	//  \pi
 
 double inline getrand(){ return (double)rand()/(double)RAND_MAX; }
+
+int inline pbc_box(int point){
+	if (point < 0 ) {
+		return point + bn;
+	}
+	else if (point > (bn-1)) {
+		return point - bn;
+	}
+	else {
+		return point;
+	}
+}
 
 double getPE(double r[N][3]){
 	int i,j,k;
@@ -75,66 +89,55 @@ double getKE(double v[N][3]){
 	return KE_c;
 }
 
-int pbc_box(int point){
-	if (point == -1) {
-		return bn-1;
-	}
-	else if (point == (bn-1)) {
-		return 0;
-	}
-	else {
-		return point;
+//charge_assignment for each atom
+//need to upgrade to input-binning later for both OpenMP and GPU
+void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn]){
+	int dx,dy,dz,pbx,pby,pbz;
+	double lx,ly,lz;
+	for (dx=0; dx<2; dx++){
+		pbx = pbc_box(b[0]+dx);
+		lx = (dx == 0) ? (hx - b[0]) : b[0];
+		for (dy=0; dy<2; dy++){
+			pby = pbc_box(b[1]+dy);
+			ly = (dy == 0) ? (hx - b[1]) : b[1];
+			for (dz=0; dz<2; dz++){
+				pbz = pbc_box(b[2]+dz);
+				lz = (dz == 0) ? (hx - b[2]) : b[2];
+				rho[pbx][pby][pbz] +=  lx*ly*lz/hx3;
+			}
+		}
 	}
 }
 
 // assign electron into bn*bn*bn boxes and store their idx
-void update_box(double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3]) {
-	double lx = newR/(double)bn;
-	int i,bx,by,bz,num;
+// also do the charge_assignment the same time for CPU
+// Input-binning would be a better option
+void update_box(double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],double rho[bn][bn][bn]) {
+	int i,j,b[3],num;
+	double basis[3];
 	for (i=0; i<N; i++) { 
-		bx = (int)floor(r[i][0]/lx);
-		by = (int)floor(r[i][1]/lx);
-		bz = (int)floor(r[i][2]/lx);
-		boxid[i][0] = bx;
-		boxid[i][1] = by;
-		boxid[i][2] = bz;
-		num = box[bx][by][bz][0]+1;
-		box[bx][by][bz][0] = num;
-		box[bx][by][bz][num] = i;
+		for (j=0; j<3; j++) {
+			b[j] = (int)floor(r[i][j]/hx);
+			boxid[i][j] = b[j];
+			basis[j] = r[i][j] - b[j]*hx;
+		}
+		num = box[b[0]][b[1]][b[2]][0]+1;
+		box[b[0]][b[1]][b[2]][0] = num;
+		box[b[0]][b[1]][b[2]][num] = i;
+		charge_assign(b,basis,rho);
 	}
 }
 
 void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3]) {
 	int i,j,k,bx,by,bz,dbx,dby,dbz,pbx,pby,pbz;
 	double rel[3], rel_c, fij[3];
-/* openmp version without cutoff
- *
-	//use openmp here with (rel[3],rel_c,fij) private
-	#pragma omp parallel for private(i,j,k,rel,rel_c,fij)
-	for (j=0; j<(N-1); j++) {
-		for (i=j+1; i<N; i++) {
-			rel_c = 0.0;
-			for (k=0; k<3; k++) {
-				rel[k] = r[i][k] - r[j][k];
-				rel_c += pow(rel[k], 2.0 );
-			}
-			rel_c = pow(rel_c, -1.5 );
-			for (k=0; k<3; k++) {
-				fij[k] = rel[k]*rel_c;
-				//atomic operation here
-				#pragma omp atomic
-				f[j][k] -= fij[k];
-				#pragma omp atomic
-				f[i][k] += fij[k];
-			}
-		}
-	}
-*/
+	double rho[bn][bn][bn] = {{0.0}};
 	// PP calculation using cell-list
 	for (i=0; i<N; i++) {
 		bx = boxid[i][0];
 		by = boxid[i][1];
 		bz = boxid[i][2];
+
 		//go through neighboring cell and check electrons within cutoff
 		for (dbx = -1; dbx  < 2; dbx++) {
 			pbx = pbc_box(bx+dbx);
@@ -164,14 +167,39 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
 				}
 			}
 		}
-		//charge assignment
 	}
 
 	//PM Here
 	
+
+/* 
+ * openmp version without cutoff
+ *
+	//use openmp here with (rel[3],rel_c,fij) private
+	#pragma omp parallel for private(i,j,k,rel,rel_c,fij)
+	for (j=0; j<(N-1); j++) {
+		for (i=j+1; i<N; i++) {
+			rel_c = 0.0;
+			for (k=0; k<3; k++) {
+				rel[k] = r[i][k] - r[j][k];
+				rel_c += pow(rel[k], 2.0 );
+			}
+			rel_c = pow(rel_c, -1.5 );
+			for (k=0; k<3; k++) {
+				fij[k] = rel[k]*rel_c;
+				//atomic operation here
+				#pragma omp atomic
+				f[j][k] -= fij[k];
+				#pragma omp atomic
+				f[i][k] += fij[k];
+			}
+		}
+	}
+*/
+
 }
 
-void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3], double dt){
+void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],double rho[bn][bn][bn], double dt){
 	int i,j;
 	double hdtm = 0.5*dt/m; 
 	for (i=0; i<N; i++) {
@@ -181,7 +209,7 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][bo
 			f[i][j] = 0.0; //setup for force calculation
 		}
 	}
-	update_box(r,box,boxid);
+	update_box(r,box,boxid,rho);
 	getForce(f,r,box,boxid);
 	for (i=0; i<N; i++) {
 		for (j=0; j<3; j++) {
@@ -195,7 +223,7 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][bo
 int main() {
 	double R[N][3] = {{0.0}}, V[N][3] = {{1.0}}, F[N][3]={{0.0}};
 	int box[bn][bn][bn][boxcap]; // need to go to class or dynamic array later
-	// for now, [0] is for number of electrons in the box, and then [1]-[number] is the electron id
+	// [0] is for number of electrons in the box, and then [1]-[number] is the electron id
 	int boxid[N][3];
 	int i, iter;
 	int numb, check;
@@ -203,6 +231,7 @@ int main() {
 	int plotstride = 20;
 	double r0,r1,r2,rel0,rel1,rel2;
 	double KE,PE;
+	double rho[bn][bn][bn];
 	FILE *RVo,*To,*initR;
 
 	RVo = fopen("./RandV.dat","w+");
@@ -243,7 +272,7 @@ int main() {
 //		fprintf(initR,"%5d %11.3f \t %11.3f \t %11.3f \n",1,R[i][0],R[i][1],R[i][2]);
 //	}
 	for (iter = 0; iter< Ntime; iter++) {
-		verlet(R,V,F,box,boxid,dt);
+		verlet(R,V,F,box,boxid,rho,dt);
 		realt += dt;
 
 		//output
