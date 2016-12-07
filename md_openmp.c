@@ -41,11 +41,13 @@
 #define pp_cutoff 500 //pp cutoff for direct interaction
 #define hx  4602.3		//should be newR/bn for length of box and meshsize 
 #define hx3 9.748e10  //hx^3
+#define bn3 1000			//bn^3 total number of mesh/grid points
 
 //parameters
 #define m 5.4858e-4		//elelctron mass
 #define vc 5.85e3			//speed of light
 #define PI 3.141592653589793	//  \pi
+#define E_coeff 1.94E-12 //to make F=eE to the right force unit with E in [Volts/meter]
 
 double inline getrand(){ return (double)rand()/(double)RAND_MAX; }
 
@@ -105,7 +107,7 @@ void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn],int id,doubl
 				pbz = pbc_box(b[2]+dz);
 				lz = (dz == 0) ? (hx - b[2]) : b[2];
 				weight = lx*ly*lz/hx3;
-				w[id][lx][ly][lz] = weight;
+				w[id][pbx][pby][pbz] = weight;
 				rho[pbx][pby][pbz] +=  weight;
 			}
 		}
@@ -132,19 +134,40 @@ void update_box(double r[N][3],int box[bn][bn][bn][boxcap],int boxid[N][3],doubl
 	charge_assign(b,basis,rho,i,w);
 }
 
-void inline forward_fft(){ fftw_plan_dft_3d(bn,bn,bn,in,out,sign, flags); }
-void inline backward_fft(){ fftw_plan_dft_3d(bn,bn,bn,in,out,sign, flags); }
+void getGlobalField(double rho[bn][bn][bn],double field[bn][bn][bn]) {
+	fftw_complex 	*f_fft_result, *b_fft_in;
+	fftw_plan			plan_forward, plan_backward;
+	int i,j,k;
 
+
+	f_fft_result  = ( fftw_complex* ) fftw_malloc( sizeof( fftw_complex ) * bn3 );
+	b_fft_in 			= ( fftw_complex* ) fftw_malloc( sizeof( fftw_complex ) * bn3 );
+
+	plan_forward  = fftw_plan_dft_r2c_3d( bn, bn, bn, &rho[0][0][0], f_fft_result, FFTW_ESTIMATE );
+	plan_backward = fftw_plan_dft_c2r_3d( bn, bn, bn, b_fft_in, &field[0][0][0], FFTW_ESTIMATE );
+	
+	fftw_execute( plan_forward );
+
+	//magic needed for put forward_fft_result to backward_fft_input
+	
+	
+  fftw_execute( plan_backward );
+	
+	//free memory
+	fftw_destroy_plan( plan_forward );
+	fftw_destroy_plan( plan_backward );
+	
+	fftw_free( f_fft_result );
+	fftw_free( b_fft_in );
+}
 
 void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],double rho[bn][bn][bn]) {
-	int i,j,k,bx,by,bz,dbx,dby,dbz,pbx,pby,pbz;
-	double rel[3], rel_c, fij[3];
 /* 
  *The PPPM algorithm:
- *	1. get FFT_forward(density_on_mesh/grid_point)
- *	2. forward fft
+ *	1. [done] get FFT_forward(density_on_mesh/grid_point)
+ *	2. [done] forward fft
  *	3. convolution
- *	4. backward fft
+ *	4. [done] backward fft
  *	
  *	this gives us the electonic field on each grid point
  *
@@ -156,7 +179,12 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
  *		using the same assignment function to get PM force on i
 */
 
-
+	int i,j,k,bx,by,bz,dbx,dby,dbz,pbx,pby,pbz;
+	double rel[3], rel_c, fij[3], field[bn][bn][bn];
+	
+	//FFT for electroic field on grid point due to all electrons(including nerighbors)
+	getGlobalField(rho,field);
+	
 	// PP calculation using cell-list
 	for (i=0; i<N; i++) {
 		bx = boxid[i][0];
@@ -178,7 +206,7 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
 							rel_c += pow(rel[k], 2.0 );
 						}
 						if (rel_c <= pp_cutoff) {
-							r
+							
 							rel_c = pow(rel_c, -1.5 );
 							for (k=0; k<3; k++) {
 								fij[k] = rel[k]*rel_c;
@@ -194,11 +222,8 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
 			}
 		}
 	}
-	
 
-/* 
- * openmp version without cutoff
- *
+/* keep the full interaction here as a check
 	//use openmp here with (rel[3],rel_c,fij) private
 	#pragma omp parallel for private(i,j,k,rel,rel_c,fij)
 	for (j=0; j<(N-1); j++) {
@@ -257,9 +282,6 @@ int main() {
 	double r0,r1,r2,rel0,rel1,rel2;
 	double KE,PE;
 	double rho[bn][bn][bn],w[N][2][2][2];
-	// 3D-fft for real data
-	fftw_complex 	*forward_fft_result, *backward_fft_in;
-	fftw_plan			plan_forward, plan_backward;
 	FILE *RVo,*To,*initR;
 
 
