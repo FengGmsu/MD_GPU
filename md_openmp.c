@@ -37,11 +37,12 @@
 
 //PPPM setup
 #define bn 10					//number of boxes per direction
-#define boxcap 101		//temporary cap for particles in one box; update to class later
+#define boxcap 1000		//temporary cap for particles in one box; update to class later
 #define pp_cutoff 500 //pp cutoff for direct interaction
 #define hx  4602.3		//should be newR/bn for length of box and meshsize 
 #define hx3 9.748e10  //hx^3
 #define bn3 1000			//bn^3 total number of mesh/grid points
+#define grid_offset 5 //make index >=0
 
 //parameters
 #define m 5.4858e-4		//elelctron mass
@@ -96,16 +97,17 @@ double getKE(double v[N][3]){
 //need to upgrade to input-binning later for both OpenMP and GPU
 void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn],int id,double w[N][2][2][2]){
 	int dx,dy,dz,pbx,pby,pbz;
-	double lx,ly,lz,weight=0.0;
+	double lx,ly,lz,weight;
+	printf("charge_assign\n");
 	for (dx=0; dx<2; dx++){
 		pbx = pbc_box(b[0]+dx);
-		lx = (dx == 0) ? (hx - b[0]) : b[0];
+		lx = (dx == 0) ? (hx - basis[0]) : basis[0];
 		for (dy=0; dy<2; dy++){
 			pby = pbc_box(b[1]+dy);
-			ly = (dy == 0) ? (hx - b[1]) : b[1];
+			ly = (dy == 0) ? (hx - basis[1]) : basis[1];
 			for (dz=0; dz<2; dz++){
 				pbz = pbc_box(b[2]+dz);
-				lz = (dz == 0) ? (hx - b[2]) : b[2];
+				lz = (dz == 0) ? (hx - basis[2]) : basis[2];
 				weight = lx*ly*lz/hx3;
 				w[id][pbx][pby][pbz] = weight;
 				rho[pbx][pby][pbz] +=  weight;
@@ -120,38 +122,71 @@ void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn],int id,doubl
 void update_box(double r[N][3],int box[bn][bn][bn][boxcap],int boxid[N][3],double rho[bn][bn][bn],double w[N][2][2][2]) {
 	int i,j,b[3],num;
 	double basis[3];
+
+	printf("update_box\n");
+	memset(rho,0.0,sizeof(double)*bn3);
 	for (i=0; i<N; i++) { 
+		printf("%d\n",i);
 		for (j=0; j<3; j++) {
+			printf("bj start\n");
 			b[j] = (int)floor(r[i][j]/hx);
+			printf("bj %d done\n",b[j]);
 			boxid[i][j] = b[j];
+			printf("boxid done\n");
 			basis[j] = r[i][j] - b[j]*hx;
+			printf("basis done\n");
+			b[j] += grid_offset;
 		}
 		num = box[b[0]][b[1]][b[2]][0]+1;
+		printf("num done %d \n",num);
 		box[b[0]][b[1]][b[2]][0] = num;
+		printf("add num\n");
 		box[b[0]][b[1]][b[2]][num] = i;
+		printf("add index\n");
+		charge_assign(b,basis,rho,i,w);
 	}
-	memset(rho,0.0,sizeof(rho));
-	charge_assign(b,basis,rho,i,w);
 }
 
-void getGlobalField(double rho[bn][bn][bn],double field[bn][bn][bn]) {
+void getGlobalField(double rho[bn][bn][bn],double field[3][bn][bn][bn]) {
 	fftw_complex 	*f_fft_result, *b_fft_in;
 	fftw_plan			plan_forward, plan_backward;
-	int i,j,k;
-
-
+	double outputcheck[bn][bn][bn];
+	int i,j,k,idx;
+	double fr,fi; // for real part and imaginary part 
+	
 	f_fft_result  = ( fftw_complex* ) fftw_malloc( sizeof( fftw_complex ) * bn3 );
 	b_fft_in 			= ( fftw_complex* ) fftw_malloc( sizeof( fftw_complex ) * bn3 );
 
 	plan_forward  = fftw_plan_dft_r2c_3d( bn, bn, bn, &rho[0][0][0], f_fft_result, FFTW_ESTIMATE );
-	plan_backward = fftw_plan_dft_c2r_3d( bn, bn, bn, b_fft_in, &field[0][0][0], FFTW_ESTIMATE );
-	
-	fftw_execute( plan_forward );
+	plan_backward = fftw_plan_dft_c2r_3d( bn, bn, bn, f_fft_result, &outputcheck[0][0][0], FFTW_ESTIMATE );
 
-	//magic needed for put forward_fft_result to backward_fft_input
+	for(i=0; i<bn; i++) {
+		fprintf(stdout, "rho[%d]=%11.3f \n", i, rho[0][0][i]);
+	}
+
+	fftw_execute( plan_forward );
+/*
+	for (i=0; i< bn; i++){
+		for (j=0; j<bn; j++){
+			for (k=0; l<(bn/2+1); k++) {
+				idx = 2*(k+(bn/2+1)*j+bn*(bn/2+1)*i);
+				//magic needed for put forward_fft_result to backward_fft_input
+				b_fft_in[idx] = ;
+				b_fft_in[idx+1] = ;
+			}
+		}
+	}
 	
+	//set b_fft_in[k=0,0,0]=0
+	b_fft_in[0] = 0.0;
+	b_fft_in[1] = 0.0;
+*/
 	
   fftw_execute( plan_backward );
+
+	for(i=0; i<bn; i++) {
+		fprintf(stdout, "result[%d]=%11.3f \n", i, outputcheck[0][0][i]);
+	}
 	
 	//free memory
 	fftw_destroy_plan( plan_forward );
@@ -179,48 +214,51 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
  *		using the same assignment function to get PM force on i
 */
 
-	int i,j,k,bx,by,bz,dbx,dby,dbz,pbx,pby,pbz;
-	double rel[3], rel_c, fij[3], field[bn][bn][bn];
+	int i,j,k,bx,by,bz,dbx,dby,dbz,pbx,pby,pbz,neighbor_j;
+	double rel[3], rel_c, fij[3], field[3][bn][bn][bn];
 	
 	//FFT for electroic field on grid point due to all electrons(including nerighbors)
-	getGlobalField(rho,field);
+//	getGlobalField(rho,field);
 	
 	// PP calculation using cell-list
 	for (i=0; i<N; i++) {
 		bx = boxid[i][0];
 		by = boxid[i][1];
 		bz = boxid[i][2];
-
 		//go through neighboring cell and check electrons within cutoff
 		for (dbx = -1; dbx  < 2; dbx++) {
 			pbx = pbc_box(bx+dbx);
 			for (dby = -1; dby  < 2; dby++) {
 				pby = pbc_box(by+dby);
 				for (dbz = -1; dbz  < 2; dbz++) {
-					// periodic boundary condition needed here
 					pbz = pbc_box(bz+dbz);
-					for (j = 1; j<box[pbx][pby][pby][0]; j++){
+					for (j = 1; j<(box[pbx][pby][pbz][0]+1); j++){
+						neighbor_j = box[pbx][pby][pbz][j];
 						rel_c = 0.0;
 						for (k=0; k<3; k++) {
 							rel[k] = r[i][k] - r[j][k];
+							rel[k] -= rint(rel[k]/newR)*newR; // for PBC 
 							rel_c += pow(rel[k], 2.0 );
 						}
-						if (rel_c <= pp_cutoff) {
-							
-							rel_c = pow(rel_c, -1.5 );
-							for (k=0; k<3; k++) {
-								fij[k] = rel[k]*rel_c;
-								//atomic operation here
-								#pragma omp atomic
-								f[j][k] -= fij[k];
-								#pragma omp atomic
-								f[i][k] += fij[k];
-							}
+						//PP
+						rel_c = pow(rel_c, -1.5 );
+						for (k=0; k<3; k++) {
+							//erfc here to scale 
+							fij[k] = rel[k]*rel_c;
+							//atomic operation here
+							#pragma omp atomic
+							f[j][k] -= fij[k];
+							#pragma omp atomic
+							f[i][k] += fij[k];
 						}
+						//cancel contribution from j to mesh points for i
+						//bx,by,bz;r[j];field[bx][by][bz];
+
 					}
 				}
 			}
 		}
+		//use w to make sum(qE)=F
 	}
 
 /* keep the full interaction here as a check
@@ -256,9 +294,11 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][bo
 		for (j=0; j<3; j++) {
 			v[i][j] += f[i][j]*hdtm;
 			r[i][j] += v[i][j]*dt;
+			r[i][j] -= rint(r[i][j]/newR)*newR;
 			f[i][j] = 0.0; //setup for force calculation
 		}
 	}
+	printf("************\n");
 	update_box(r,box,boxid,rho,w);
 	getForce(f,r,box,boxid,rho);
 	for (i=0; i<N; i++) {
@@ -293,9 +333,9 @@ int main() {
 	srand(time(NULL));
 	numb = 0;
 	while (numb < N) {
-		r0 = newR*(2*getrand()-1);
-		r1 = newR*(2*getrand()-1);
-		r2 = newR*(2*getrand()-1);
+		r0 = newR*getrand();
+		r1 = newR*getrand();
+		r2 = newR*getrand();
 		check = 0;
 		if (sqrt(r0*r0+r1*r1+r2*r2) < newR) {
 			for (i = 0; i < numb; i++){
@@ -325,6 +365,7 @@ int main() {
 	
 	for (iter = 0; iter< Ntime; iter++) {
 		//Simulation
+		printf("before verlet \n");
 		verlet(R,V,F,box,boxid,rho,w,dt);
 		realt += dt;
 

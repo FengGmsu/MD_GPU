@@ -8,7 +8,7 @@ all: d
 $(TARGET).o: $(TARGET).c
 
 d: $(TARGET).o
-	$(CC) $(CFLAGS) $(LIBS) $(TARGET).o -o $@
+	$(CC) $(CFLAGS) $(TARGET).o -o $@ $(LIBS)
 
 # Clean
 clean:
