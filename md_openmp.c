@@ -27,6 +27,7 @@
 #include <math.h>
 #include <time.h>
 #include <omp.h>
+#include <fftw3.h>
 
 //simulation setup
 #define N 1000				//number of particles
@@ -89,11 +90,11 @@ double getKE(double v[N][3]){
 	return KE_c;
 }
 
-//charge_assignment for each atom
+//charge_assignment for each atom and save the weight for each neighboring grid
 //need to upgrade to input-binning later for both OpenMP and GPU
-void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn]){
+void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn],int id,double w[N][2][2][2]){
 	int dx,dy,dz,pbx,pby,pbz;
-	double lx,ly,lz;
+	double lx,ly,lz,weight=0.0;
 	for (dx=0; dx<2; dx++){
 		pbx = pbc_box(b[0]+dx);
 		lx = (dx == 0) ? (hx - b[0]) : b[0];
@@ -103,7 +104,9 @@ void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn]){
 			for (dz=0; dz<2; dz++){
 				pbz = pbc_box(b[2]+dz);
 				lz = (dz == 0) ? (hx - b[2]) : b[2];
-				rho[pbx][pby][pbz] +=  lx*ly*lz/hx3;
+				weight = lx*ly*lz/hx3;
+				w[id][lx][ly][lz] = weight;
+				rho[pbx][pby][pbz] +=  weight;
 			}
 		}
 	}
@@ -112,7 +115,7 @@ void charge_assign(int b[3], double basis[3],double rho[bn][bn][bn]){
 // assign electron into bn*bn*bn boxes and store their idx
 // also do the charge_assignment the same time for CPU
 // Input-binning would be a better option
-void update_box(double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],double rho[bn][bn][bn]) {
+void update_box(double r[N][3],int box[bn][bn][bn][boxcap],int boxid[N][3],double rho[bn][bn][bn],double w[N][2][2][2]) {
 	int i,j,b[3],num;
 	double basis[3];
 	for (i=0; i<N; i++) { 
@@ -124,14 +127,36 @@ void update_box(double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],dou
 		num = box[b[0]][b[1]][b[2]][0]+1;
 		box[b[0]][b[1]][b[2]][0] = num;
 		box[b[0]][b[1]][b[2]][num] = i;
-		charge_assign(b,basis,rho);
 	}
+	memset(rho,0.0,sizeof(rho));
+	charge_assign(b,basis,rho,i,w);
 }
 
-void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3]) {
+void inline forward_fft(){ fftw_plan_dft_3d(bn,bn,bn,in,out,sign, flags); }
+void inline backward_fft(){ fftw_plan_dft_3d(bn,bn,bn,in,out,sign, flags); }
+
+
+void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],double rho[bn][bn][bn]) {
 	int i,j,k,bx,by,bz,dbx,dby,dbz,pbx,pby,pbz;
 	double rel[3], rel_c, fij[3];
-	double rho[bn][bn][bn] = {{0.0}};
+/* 
+ *The PPPM algorithm:
+ *	1. get FFT_forward(density_on_mesh/grid_point)
+ *	2. forward fft
+ *	3. convolution
+ *	4. backward fft
+ *	
+ *	this gives us the electonic field on each grid point
+ *
+ * 	PPPM force calculation:
+ *	for every particle i
+ *		for every neighbor j of i 
+ *			cancel contribution from j on each neighboring mesh point of i
+ *			get PP force from j to i  
+ *		using the same assignment function to get PM force on i
+*/
+
+
 	// PP calculation using cell-list
 	for (i=0; i<N; i++) {
 		bx = boxid[i][0];
@@ -153,6 +178,7 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
 							rel_c += pow(rel[k], 2.0 );
 						}
 						if (rel_c <= pp_cutoff) {
+							r
 							rel_c = pow(rel_c, -1.5 );
 							for (k=0; k<3; k++) {
 								fij[k] = rel[k]*rel_c;
@@ -168,8 +194,6 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
 			}
 		}
 	}
-
-	//PM Here
 	
 
 /* 
@@ -199,7 +223,8 @@ void getForce(double f[N][3],double r[N][3], int box[bn][bn][bn][boxcap], int bo
 
 }
 
-void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],double rho[bn][bn][bn], double dt){
+
+void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][boxcap], int boxid[N][3],double rho[bn][bn][bn],double w[N][2][2][2],double dt){
 	int i,j;
 	double hdtm = 0.5*dt/m; 
 	for (i=0; i<N; i++) {
@@ -209,8 +234,8 @@ void verlet(double r[N][3],double v[N][3],double f[N][3], int box[bn][bn][bn][bo
 			f[i][j] = 0.0; //setup for force calculation
 		}
 	}
-	update_box(r,box,boxid,rho);
-	getForce(f,r,box,boxid);
+	update_box(r,box,boxid,rho,w);
+	getForce(f,r,box,boxid,rho);
 	for (i=0; i<N; i++) {
 		for (j=0; j<3; j++) {
 			v[i][j] += f[i][j]*hdtm;
@@ -227,12 +252,16 @@ int main() {
 	int boxid[N][3];
 	int i, iter;
 	int numb, check;
-	double dt = 1.0, realt = 0.0;
+	double dt = 0.1, realt = 0.0;
 	int plotstride = 20;
 	double r0,r1,r2,rel0,rel1,rel2;
 	double KE,PE;
-	double rho[bn][bn][bn];
+	double rho[bn][bn][bn],w[N][2][2][2];
+	// 3D-fft for real data
+	fftw_complex 	*forward_fft_result, *backward_fft_in;
+	fftw_plan			plan_forward, plan_backward;
 	FILE *RVo,*To,*initR;
+
 
 	RVo = fopen("./RandV.dat","w+");
 	To = fopen("./time.dat","w+");
@@ -271,8 +300,10 @@ int main() {
 //	for (i = 0; i<N; i++) {
 //		fprintf(initR,"%5d %11.3f \t %11.3f \t %11.3f \n",1,R[i][0],R[i][1],R[i][2]);
 //	}
+	
 	for (iter = 0; iter< Ntime; iter++) {
-		verlet(R,V,F,box,boxid,rho,dt);
+		//Simulation
+		verlet(R,V,F,box,boxid,rho,w,dt);
 		realt += dt;
 
 		//output

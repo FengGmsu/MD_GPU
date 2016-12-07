@@ -1,7 +1,5 @@
-# Commet lines
-# Here we define compiler option, libraries and the target
 C = icc
-CFLAGS = -Wall -O3 -g -fopenmp
+CFLAGS = -Wall -O3 -g -fopenmp -lfftw3 -lm
 
 TARGET = md_openmp
 
